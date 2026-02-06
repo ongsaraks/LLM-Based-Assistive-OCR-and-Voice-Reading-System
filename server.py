@@ -12,7 +12,6 @@ import json
 from openai import OpenAI
 
 # === CONFIG ===
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 TEMP_DIR = "temp"
 IMG_DIR = "img"
 
@@ -178,6 +177,14 @@ def speak(text):
     tts.save(filename)
     playsound(filename)
     os.remove(filename)
+# def speak(text):
+#     filename = f"{TEMP_DIR}/{uuid.uuid4()}.mp3"
+#     # tts = TTS(model="v1") 
+#     tts = TTS(model_name="f5_tts_th_small", speaker_name="pim", device="gpu")
+#     audio = tts.synthesize(text)
+#     sf.write(filename, audio, samplerate=22050)
+#     playsound(filename)
+#     os.remove(filename)
     
 @app.route("/", methods=["GET"])
 def index():
@@ -185,50 +192,52 @@ def index():
 
 @app.route("/ocr", methods=["POST"])
 def ocr_image():
-    if "image" not in request.files:
-        return jsonify({"error": "no image"}), 400
+    # Fix: ESP32 sends raw binary, not multipart form-data
+    img_bytes = request.data 
+    
+    if not img_bytes:
+        return jsonify({"error": "No data received"}), 400
 
-    img_bytes = request.files["image"].read()
     npimg = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
 
-    # === Preprocess (สำคัญ) ===
+    if img is None:
+        return jsonify({"error": "Failed to decode image"}), 400
+
+    # === Preprocess ===
+    # Pro Tip: Over-processing (like heavy Gaussian blur + Thresh) can sometimes 
+    # hurt OCR if the text is small. Let's keep it simple first.
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    #=== Save processed image temporarily ===
+    
+    # Save for Typhoon OCR
     image_id = str(uuid.uuid4())
     processed_path = os.path.join(IMG_DIR, f"{image_id}.png")
-    cv2.imwrite(processed_path, thresh)
+    cv2.imwrite(processed_path, gray)
 
-    # OCR ไทย + อังกฤ
+    # OCR Logic
     api_key = os.getenv('API_KEY')
-    image_path = processed_path  
-    model = "typhoon-ocr"
-    task_type = "default"
-    max_tokens = 16384
-    temperature = 0.1
-    top_p = 0.6
-    repetition_penalty = 1.2
-    pages = None
-    
-    extracted_text = extract_text_from_image(processed_path, api_key, model, task_type, max_tokens, temperature, top_p, repetition_penalty, pages)
-    if extracted_text == "":
-        extracted_text = "ไม่พบข้อความ"
-    print("OCR Result:", extracted_text)
-    messages = build_label_messages(extracted_text)
-    result = generate_label(messages)
-    print(result)
+    extracted_text = extract_text_from_image(
+        processed_path, api_key, "typhoon-ocr", "default", 16384, 0.1, 0.6, 1.2
+    )
 
-    # Speak with matched voice
-    # if isinstance(summary, str) and summary.startswith("ไม่สามารถสร้างสรุปได้"):
-    #     speak(extracted_text)
-    # else:
-        # speak(summary)
-    speak(result)
+    if not extracted_text or extracted_text.strip() == "":
+        extracted_text = "ไม่พบข้อความในรูปภาพ"
+    
+    print(f"OCR Result: {extracted_text}")
+    
+    # Generate Summary for TTS
+    messages = build_label_messages(extracted_text)
+    summary = generate_label(messages)
+    print(f"Summary: {summary}")
+
+    # Speak (Note: This blocks the response until audio finishes playing)
+    # Consider running this in a background thread if the ESP32 times out.
+    speak(summary)
 
     return jsonify({
-        "text": extracted_text
+        "status": "success",
+        "extracted_text": extracted_text,
+        "summary": summary
     })
 
 if __name__ == "__main__":
